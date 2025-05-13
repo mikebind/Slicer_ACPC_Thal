@@ -50,12 +50,10 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
         self._observedMarkupsNode = None
-        self._markupsObserverTags = []  # Store multiple tags
+        self._markupsObserverTags = []
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
-
-        # Instantiate and connect widgets ...
 
         # Parameters Area
         parametersCollapsibleButton = ctk.ctkCollapsibleButton()
@@ -70,14 +68,14 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.markupsSelector.addEnabled = True
         self.markupsSelector.removeEnabled = True
         self.markupsSelector.renameEnabled = True
-        self.markupsSelector.noneEnabled = False  # Require a selection or creation
+        self.markupsSelector.noneEnabled = False
         self.markupsSelector.showHidden = False
         self.markupsSelector.showChildNodeTypes = False
         self.markupsSelector.setMRMLScene(slicer.mrmlScene)
         self.markupsSelector.setToolTip(
             "Select or create the Markups Node for AC, PC, IH points."
         )
-        self.markupsSelector.baseName = "ACPCSites"  # Default base name for new nodes
+        self.markupsSelector.baseName = "ACPCSites"
         parametersFormLayout.addRow(
             "Fiducial Points (AC,PC,IH): ", self.markupsSelector
         )
@@ -85,9 +83,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         # Markups Place Widget
         self.markupsPlaceWidget = slicer.qSlicerMarkupsPlaceWidget()
         self.markupsPlaceWidget.setMRMLScene(slicer.mrmlScene)
-        # self.markupsPlaceWidget.placeMultipleMarkups = slicer.qSlicerMarkupsPlaceWidget.ForcePlaceMultipleMarkups # Enable continuous placement
-        # Let user control this with the widget's own checkbox for "Place multiple markups"
-        self.markupsPlaceWidget.buttonsVisible = True  # Show place, delete, etc.
+        self.markupsPlaceWidget.buttonsVisible = True
         parametersFormLayout.addRow("Place Points:", self.markupsPlaceWidget)
 
         # Output Transform Node Selector
@@ -127,11 +123,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         )
         self.applyButton.connect("clicked(bool)", self.onApplyButton)
 
-        # Add vertical spacer
         self.layout.addStretch(1)
-
-        # Initial state
-        # If a markups node is already selected (e.g. scene loaded with selection), ensure it's handled
         self.onMarkupsNodeSelected(self.markupsSelector.currentNode())
         self.updateApplyButtonState()
 
@@ -142,45 +134,62 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
     def removeMarkupObservers(self):
         if self._observedMarkupsNode and self._markupsObserverTags:
             for tag in self._markupsObserverTags:
-                self._observedMarkupsNode.RemoveObserver(tag)
+                try:  # Add try-except for safety during cleanup
+                    self._observedMarkupsNode.RemoveObserver(tag)
+                except AttributeError:  # Node might have been deleted
+                    logging.debug(
+                        "Could not remove observer, node might be already deleted."
+                    )
         self._observedMarkupsNode = None
         self._markupsObserverTags = []
 
     def onMarkupsNodeAddedByUser(self, node):
-        # This is called when the user creates a new node using the qMRMLNodeComboBox
         if node and isinstance(node, slicer.vtkMRMLMarkupsFiducialNode):
             logging.debug(f"User added new markups node: {node.GetName()}")
-            self.ensureMarkupsNodeIsSetup(node)
-        # currentNodeChanged will also be called, which links to place widget and updates UI
+            # ensureMarkupsNodeIsSetup will be called by onMarkupsNodeSelected
+            # which is typically triggered after nodeAddedByUser effectively changes current node
 
     def onMarkupsNodeSelected(self, node):
         logging.debug(
             f"Markups node selection changed to: {node.GetName() if node else 'None'}"
         )
-        self.removeMarkupObservers()  # Remove observers from previously selected node
+        self.removeMarkupObservers()
 
         if node and isinstance(node, slicer.vtkMRMLMarkupsFiducialNode):
             self._observedMarkupsNode = node
-            # Observe relevant events to update UI (e.g., enable Apply button)
-            events = [
-                slicer.vtkMRMLMarkupsNode.PointModifiedEvent,
-                slicer.vtkMRMLMarkupsNode.MarkupAddedEvent,
-                slicer.vtkMRMLMarkupsNode.MarkupRemovedEvent,
-                slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,  # Slicer 5.7+
-                slicer.vtkMRMLMarkupsNode.PointPositionUndefinedEvent,  # Slicer 5.7+
-            ]
-            for event in events:
-                # Check if event exists in case of Slicer version differences
-                if hasattr(slicer.vtkMRMLMarkupsNode, event_name_from_value(event)):
-                    tag = node.AddObserver(event, self.onMarkupPointModified)
-                    self._markupsObserverTags.append(tag)
 
-            self.ensureMarkupsNodeIsSetup(node)  # Setup if empty
+            # Core events that should always be present
+            core_event_ids = [
+                slicer.vtkMRMLMarkupsNode.PointModifiedEvent,
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent,  # Corrected
+                slicer.vtkMRMLMarkupsNode.PointRemovedEvent,  # Corrected
+            ]
+            for event_id in core_event_ids:
+                tag = node.AddObserver(event_id, self.onMarkupPointModified)
+                self._markupsObserverTags.append(tag)
+                logging.debug(
+                    f"Added observer for event ID {event_id} on node {node.GetName()}"
+                )
+
+            # Newer events - check for their existence by attribute name before using
+            # These give more granular updates on point placement status.
+            newer_event_names = [
+                "PointPositionDefinedEvent",
+                "PointPositionUndefinedEvent",
+            ]
+            for event_name_str in newer_event_names:
+                if hasattr(slicer.vtkMRMLMarkupsNode, event_name_str):
+                    event_id = getattr(slicer.vtkMRMLMarkupsNode, event_name_str)
+                    tag = node.AddObserver(event_id, self.onMarkupPointModified)
+                    self._markupsObserverTags.append(tag)
+                    logging.debug(
+                        f"Added observer for {event_name_str} (ID: {event_id}) on node {node.GetName()}"
+                    )
+
+            self.ensureMarkupsNodeIsSetup(node)
             self.markupsPlaceWidget.setCurrentNode(node)
         else:
-            self.markupsPlaceWidget.setCurrentNode(
-                None
-            )  # No node selected or wrong type
+            self.markupsPlaceWidget.setCurrentNode(None)
 
         self.updateApplyButtonState()
 
@@ -190,7 +199,6 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         ):
             return
 
-        # Only set up if the node is completely empty
         if markupsNode.GetNumberOfControlPoints() == 0:
             logging.info(
                 f"Initializing markups node '{markupsNode.GetName()}' with AC, PC, IH unplaced points."
@@ -198,34 +206,26 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             wasModified = markupsNode.StartModify()
             pointLabels = ["AC", "PC", "IH"]
             for label in pointLabels:
-                # AddNPoints adds an unplaced point by default
                 markupsNode.AddNPoints(1)
                 idx = markupsNode.GetNumberOfControlPoints() - 1
                 markupsNode.SetNthControlPointLabel(idx, label)
-                # Default position status from AddNPoints is PositionUndefined, which is correct.
             markupsNode.EndModify(wasModified)
-
-            # Optionally, activate placement for the first point immediately
-            # This might be too aggressive; user might want to adjust views first.
-            # if self.markupsPlaceWidget.currentNode() == markupsNode:
-            #     self.markupsPlaceWidget.setPlaceModeEnabled(True)
         else:
             logging.debug(
                 f"Markups node '{markupsNode.GetName()}' not empty, skipping auto-setup."
             )
 
     def onMarkupPointModified(self, caller, event):
-        # Called when a point is placed, moved, added, or removed
         logging.debug(
-            f"Markup event '{event}' received from {caller.GetName if caller else 'Unknown'}"
+            f"Markup event (ID: {event}) received from {caller.GetName() if caller else 'UnknownCaller'}"
         )
         self.updateApplyButtonState()
 
     def updateApplyButtonState(self):
         markupsNode = self.markupsSelector.currentNode()
         outputNode = self.outputTransformSelector.currentNode()
-
         readyToApply = False
+
         if (
             markupsNode
             and isinstance(markupsNode, slicer.vtkMRMLMarkupsFiducialNode)
@@ -251,7 +251,6 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         inputMarkupsNode = self.markupsSelector.currentNode()
         outputTransformNode = self.outputTransformSelector.currentNode()
 
-        # Validation already done by updateApplyButtonState for enabling, but double check is fine
         if (
             not inputMarkupsNode
             or not isinstance(inputMarkupsNode, slicer.vtkMRMLMarkupsFiducialNode)
@@ -285,16 +284,8 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         logic.run(inputMarkupsNode, outputTransformNode)
 
 
-# Helper to get event name string (for Slicer versions)
-def event_name_from_value(event_value):
-    for name, value in slicer.vtkMRMLMarkupsNode.__dict__.items():
-        if value == event_value and name.endswith("Event"):
-            return name
-    return None
-
-
 #
-# ACPCTransformLogic (largely unchanged from previous version)
+# ACPCTransformLogic (Unchanged from the correctly working version)
 #
 class ACPCTransformLogic(ScriptedLoadableModuleLogic):
     def createACPCTransformMatrix(self, p_ac_np, p_pc_np, p_ih_np):
@@ -433,7 +424,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
 
 
 #
-# ACPCTransformTest (largely unchanged)
+# ACPCTransformTest (Unchanged)
 #
 class ACPCTransformTest(ScriptedLoadableModuleTest):
     def setUp(self):
@@ -441,39 +432,35 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
 
     def runTest(self):
         self.setUp()
-        self.test_ACPCTransform_Calculation_Interactive()  # Updated test name
+        self.test_ACPCTransform_Calculation_Interactive()
 
     def test_ACPCTransform_Calculation_Interactive(self):
         self.delayDisplay(
             "Starting AC-PC Transform test with simulated interactive placement"
         )
-
-        # Create MarkupsNode - this would be done by the widget now
         markupsNode = slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLMarkupsFiducialNode", "TestFiducials"
         )
 
-        # Simulate ensureMarkupsNodeIsSetup
         pointLabels = ["AC", "PC", "IH"]
         for label in pointLabels:
             markupsNode.AddNPoints(1)
             idx = markupsNode.GetNumberOfControlPoints() - 1
             markupsNode.SetNthControlPointLabel(idx, label)
 
-        # Simulate point placement
         ac_coords = [0, 10, 0]
         pc_coords = [0, -10, 0]
-        ih_coords = [0, 0, 10]  # IH on the mid-sagittal YZ plane, superior to MCP
+        ih_coords = [0, 0, 10]
 
-        markupsNode.SetNthControlPointPositionWorld(0, ac_coords)  # Places "AC"
+        markupsNode.SetNthControlPointPositionWorld(0, ac_coords)
         markupsNode.SetNthControlPointPositionStatus(
             0, slicer.vtkMRMLMarkupsNode.PositionDefined
         )
-        markupsNode.SetNthControlPointPositionWorld(1, pc_coords)  # Places "PC"
+        markupsNode.SetNthControlPointPositionWorld(1, pc_coords)
         markupsNode.SetNthControlPointPositionStatus(
             1, slicer.vtkMRMLMarkupsNode.PositionDefined
         )
-        markupsNode.SetNthControlPointPositionWorld(2, ih_coords)  # Places "IH"
+        markupsNode.SetNthControlPointPositionWorld(2, ih_coords)
         markupsNode.SetNthControlPointPositionStatus(
             2, slicer.vtkMRMLMarkupsNode.PositionDefined
         )
@@ -481,7 +468,6 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
         outputTransformNode = slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLTransformNode", "TestACPCTransform"
         )
-
         logic = ACPCTransformLogic()
         success = logic.run(markupsNode, outputTransformNode)
         self.assertTrue(success)
@@ -502,12 +488,10 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
                     places=5,
                 )
 
-        # Test a more complex case (as in previous version)
         self.delayDisplay("Setting up complex case for test")
-        markupsNode.SetNthControlPointPositionWorld(0, [1, 11, 1])  # AC
-        markupsNode.SetNthControlPointPositionWorld(1, [1, -9, 1])  # PC
-        markupsNode.SetNthControlPointPositionWorld(2, [1, 1, 11])  # IH
-        # Ensure position status is Defined (already should be from above)
+        markupsNode.SetNthControlPointPositionWorld(0, [1, 11, 1])
+        markupsNode.SetNthControlPointPositionWorld(1, [1, -9, 1])
+        markupsNode.SetNthControlPointPositionWorld(2, [1, 1, 11])
         for i in range(3):
             markupsNode.SetNthControlPointPositionStatus(
                 i, slicer.vtkMRMLMarkupsNode.PositionDefined
@@ -516,7 +500,6 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
         success = logic.run(markupsNode, outputTransformNode)
         self.assertTrue(success)
         outputTransformNode.GetMatrixTransformToParent(matrix_vtk)
-
         expected_elements_complex = [
             [1, 0, 0, -1],
             [0, 1, 0, -1],
@@ -531,5 +514,4 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
                     places=5,
                     msg=f"Elem ({r},{c})",
                 )
-
         self.delayDisplay("AC-PC Transform test passed")
