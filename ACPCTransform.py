@@ -25,8 +25,8 @@ class ACPCTransform(ScriptedLoadableModule):
         self.parent.helpText = """
         This module creates a transform to align a volume to the AC-PC (Anterior Commissure - Posterior Commissure) coordinate system.
         It uses an interactive point placement widget.
-        1. Select or create a Markups Fiducial node.
-        2. If the node is new/empty, it will be pre-populated with "AC", "PC", "IH" unplaced points.
+        1. Click 'Create New AC-PC Points Node' or select/create a Markups Fiducial node.
+        2. If the node is new/empty (e.g., created by the button), it will be pre-populated with "AC", "PC", "IH" unplaced points.
         3. Use the 'Place Points' widget to interactively define the positions of AC, PC, and IH in that order.
         4. Select or create an output Transform node.
         5. Click 'Apply' to generate the AC-PC alignment transform.
@@ -51,45 +51,65 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         ScriptedLoadableModuleWidget.__init__(self, parent)
         self._observedMarkupsNode = None
         self._markupsObserverTags = []
+        self._observedNucleiMarkupsNode = None
+        self._nucleiMarkupsObserverTags = []
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
+
+        self.logic = ACPCTransformLogic()
 
         parametersCollapsibleButton = ctk.ctkCollapsibleButton()
         parametersCollapsibleButton.text = "Parameters"
         self.layout.addWidget(parametersCollapsibleButton)
         parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
+        # Create AC-PC Template Node Button --- NEW WIDGET ---
+        self.createTemplateButton = qt.QPushButton("Create New AC-PC Points Node")
+        self.createTemplateButton.toolTip = "Creates and initializes a new Markups Fiducial node for AC, PC, and IH points."
+        parametersFormLayout.addRow(self.createTemplateButton)  # Added button here
+
+        # Input Markups Fiducial Node Selector
         self.markupsSelector = slicer.qMRMLNodeComboBox()
         self.markupsSelector.nodeTypes = ["vtkMRMLMarkupsFiducialNode"]
-        self.markupsSelector.selectNodeUponCreation = False
-        self.markupsSelector.addEnabled = True
+        self.markupsSelector.selectNodeUponCreation = (
+            False  # We handle selection explicitly
+        )
+        self.markupsSelector.addEnabled = True  # Still allow creation via combobox too
         self.markupsSelector.removeEnabled = True
         self.markupsSelector.renameEnabled = True
-        self.markupsSelector.noneEnabled = True
+        self.markupsSelector.noneEnabled = (
+            True  # Allow no node to be selected initially
+        )
         self.markupsSelector.showHidden = False
         self.markupsSelector.showChildNodeTypes = False
         self.markupsSelector.setMRMLScene(slicer.mrmlScene)
         self.markupsSelector.setToolTip(
             "Select or create the Markups Node for AC, PC, IH points."
         )
-        self.markupsSelector.baseName = "ACPC_Sites"
+        self.markupsSelector.baseName = (
+            "ACPC_Sites"  # Base name for nodes created by combobox
+        )
         parametersFormLayout.addRow(
             "Fiducial Points (AC,PC,IH): ", self.markupsSelector
         )
 
+        # Markups Place Widget
         self.markupsPlaceWidget = slicer.qSlicerMarkupsPlaceWidget()
         self.markupsPlaceWidget.setMRMLScene(slicer.mrmlScene)
         self.markupsPlaceWidget.buttonsVisible = True
         parametersFormLayout.addRow("Place Points:", self.markupsPlaceWidget)
 
+        # Output Transform Node Selector
         self.outputTransformSelector = slicer.qMRMLNodeComboBox()
         self.outputTransformSelector.nodeTypes = ["vtkMRMLTransformNode"]
         self.outputTransformSelector.selectNodeUponCreation = False
         self.outputTransformSelector.addEnabled = True
         self.outputTransformSelector.removeEnabled = True
         self.outputTransformSelector.renameEnabled = True
-        self.outputTransformSelector.noneEnabled = False
+        self.outputTransformSelector.noneEnabled = (
+            False  # An output must be selected/created for apply
+        )
         self.outputTransformSelector.showHidden = False
         self.outputTransformSelector.showChildNodeTypes = False
         self.outputTransformSelector.setMRMLScene(slicer.mrmlScene)
@@ -101,11 +121,78 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             "Output AC-PC Transform: ", self.outputTransformSelector
         )
 
-        self.applyButton = qt.QPushButton("Apply")
-        self.applyButton.toolTip = "Run the AC-PC transform calculation."
-        self.applyButton.enabled = False
-        parametersFormLayout.addRow(self.applyButton)
+        # Calculate Button
+        self.calculateTransformButton = qt.QPushButton("Calculate ACPC Transform")
+        self.calculateTransformButton.toolTip = "Run the AC-PC transform calculation."
+        self.calculateTransformButton.enabled = False
+        parametersFormLayout.addRow(self.calculateTransformButton)
+        # Image Selector
+        self.imageSelector = slicer.qMRMLNodeComboBox()
+        self.imageSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.imageSelector.selectNodeUponCreation = False
+        self.imageSelector.addEnabled = False
+        self.imageSelector.removeEnabled = True
+        self.imageSelector.renameEnabled = True
+        self.imageSelector.noneEnabled = True
+        self.imageSelector.showHidden = False
+        self.imageSelector.showChildNodeTypes = False
+        self.imageSelector.setMRMLScene(slicer.mrmlScene)
+        self.imageSelector.setToolTip("Select image to transform")
+        parametersFormLayout.addRow("Image to transform: ", self.imageSelector)
 
+        # Reorient Image Button
+        self.reorientButton = qt.QPushButton("Reorient")
+        self.reorientButton.toolTip = "Reorient image and landmarks"
+        self.reorientButton.enabled = False
+        parametersFormLayout.addRow(self.reorientButton)
+        # Create Nuclei Template Button
+        self.createNucleiTemplateButton = qt.QPushButton("Create Nuclei Template")
+        self.createNucleiTemplateButton.enabled = False
+        self.createNucleiTemplateButton.toolTip = (
+            "Create thalamic nuclei template landmarks"
+        )
+        parametersFormLayout.addRow(self.createNucleiTemplateButton)
+        # Nuclei markups selector
+        self.nucleiMarkupsSelector = slicer.qMRMLNodeComboBox()
+        self.nucleiMarkupsSelector.nodeTypes = ["vtkMRMLMarkupsFiducialNode"]
+        self.nucleiMarkupsSelector.selectNodeUponCreation = (
+            False  # We handle selection explicitly
+        )
+        self.nucleiMarkupsSelector.addEnabled = (
+            True  # Still allow creation via combobox too
+        )
+        self.nucleiMarkupsSelector.removeEnabled = True
+        self.nucleiMarkupsSelector.renameEnabled = True
+        self.nucleiMarkupsSelector.noneEnabled = (
+            True  # Allow no node to be selected initially
+        )
+        self.nucleiMarkupsSelector.showHidden = False
+        self.nucleiMarkupsSelector.showChildNodeTypes = False
+        self.nucleiMarkupsSelector.setMRMLScene(slicer.mrmlScene)
+        self.nucleiMarkupsSelector.setToolTip(
+            "Select or create the Markups Node for thalamic nuclei."
+        )
+        self.nucleiMarkupsSelector.baseName = (
+            "Nuclei_Sites"  # Base name for nodes created by combobox
+        )
+        parametersFormLayout.addRow("Nuclei Landmarks: ", self.nucleiMarkupsSelector)
+        # Jump to next point (lock previous? place mode if unset)
+        self.nextPointButton = qt.QPushButton("Jump To Next Nucleus")
+        self.nextPointButton.toolTip = "Jump to next thalamic nucleus point"
+        self.nextPointButton.enabled = False
+        parametersFormLayout.addRow(self.nextPointButton)
+        # Previous point button
+        self.previousPointButton = qt.QPushButton("Jump to Previous Nucleus")
+        self.previousPointButton.toolTip = "Jump to previous thalamic nucleus point"
+        self.previousPointButton.enabled = False
+        parametersFormLayout.addRow(self.previousPointButton)
+        # Save button
+        self.saveButton = qt.QPushButton("Save Final Locations")
+
+        # Connections
+        self.createTemplateButton.connect(
+            "clicked(bool)", self.onCreateACPCTemplateNode
+        )
         self.markupsSelector.connect(
             "currentNodeChanged(vtkMRMLNode*)", self.onMarkupsNodeSelected
         )
@@ -113,13 +200,32 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             "nodeAddedByUser(vtkMRMLNode*)", self.onMarkupsNodeAddedByUser
         )
         self.outputTransformSelector.connect(
-            "currentNodeChanged(vtkMRMLNode*)", self.updateApplyButtonState
+            "currentNodeChanged(vtkMRMLNode*)", self.updateCalculateTransformButtonState
         )
-        self.applyButton.connect("clicked(bool)", self.onApplyButton)
+        self.calculateTransformButton.connect(
+            "clicked(bool)", self.onCalculateTransformButton
+        )
+        self.imageSelector.connect(
+            "currentNodeChanged(vtkMRMLNode*)", self.onImageSelected
+        )
+        self.reorientButton.connect("clicked(bool)", self.onReorientButton)
+        self.createNucleiTemplateButton.connect(
+            "clicked(bool)", self.onCreateNucleiTemplateButton
+        )
+        self.nucleiMarkupsSelector.connect(
+            "currentNodeChanged(vtkMRMLNode*)", self.onNucleiMarkupsNodeSelected
+        )
+        self.nextPointButton.connect("clicked(bool)", self.onNextPointButton)
+        self.previousPointButton.connect("clicked(bool)", self.onPreviousPointButton)
+        self.saveButton.connect("clicked(bool)", self.onSaveButton)
 
         self.layout.addStretch(1)
-        self.onMarkupsNodeSelected(self.markupsSelector.currentNode())
-        self.updateApplyButtonState()
+        # Initial setup call for markups node if one is already selected from previous session/scene
+        if self.markupsSelector.currentNode():
+            self.onMarkupsNodeSelected(self.markupsSelector.currentNode())
+        else:  # Ensure place widget is cleared if no node is selected initially
+            self.markupsPlaceWidget.setCurrentNode(None)
+        self.updateCalculateTransformButtonState()
 
     def cleanup(self):
         ScriptedLoadableModuleWidget.cleanup(self)
@@ -130,23 +236,60 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             for tag in self._markupsObserverTags:
                 try:
                     self._observedMarkupsNode.RemoveObserver(tag)
-                except AttributeError:
+                except AttributeError:  # Node might have been deleted from scene
                     logging.debug(
                         "Could not remove observer, node might be already deleted."
                     )
         self._observedMarkupsNode = None
         self._markupsObserverTags = []
 
+    def onCreateACPCTemplateNode(self):  # --- NEW METHOD ---
+        logging.debug("onCreateACPCTemplateNode called")
+        baseName = (
+            self.markupsSelector.baseName
+            if self.markupsSelector.baseName
+            else "ACPCSites_New"
+        )
+        newNodeName = slicer.mrmlScene.GenerateUniqueName(baseName)
+
+        newNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsFiducialNode", newNodeName
+        )
+        if not newNode:
+            logging.error(f"Failed to create new markups node: {newNodeName}")
+            slicer.util.errorDisplay(
+                f"Could not create new Markups Fiducial node: {newNodeName}"
+            )
+            return
+
+        logging.info(f"Created new markups node via button: {newNode.GetName()}")
+
+        # ensureMarkupsNodeIsSetup will populate AC, PC, IH
+        # onMarkupsNodeSelected (triggered by setCurrentNode) will also call ensureMarkupsNodeIsSetup.
+        # To avoid double setup or issues if ensureMarkupsNodeIsSetup isn't idempotent for an empty node,
+        # we can call it directly here, and onMarkupsNodeSelected will correctly link observers and place widget.
+        self.ensureMarkupsNodeIsSetup(newNode)
+
+        self.markupsSelector.setCurrentNode(newNode)
+        # setCurrentNode will trigger onMarkupsNodeSelected, which will:
+        # 1. Set up observers
+        # 2. Call ensureMarkupsNodeIsSetup again (it's safe as it checks for empty node)
+        # 3. Link self.markupsPlaceWidget.setCurrentNode(newNode)
+        # 4. Update apply button state
+
     def onMarkupsNodeAddedByUser(self, node):
+        # This is called when the user creates a new node using the qMRMLNodeComboBox's "Create new..."
         if node and isinstance(node, slicer.vtkMRMLMarkupsFiducialNode):
-            logging.debug(f"User added new markups node: {node.GetName()}")
-            # onMarkupsNodeSelected will be triggered, which calls ensureMarkupsNodeIsSetup
+            logging.debug(f"User added new markups node via ComboBox: {node.GetName()}")
+            # ensureMarkupsNodeIsSetup is called by onMarkupsNodeSelected,
+            # which is triggered when currentNodeChanged signal is emitted after node creation.
+            # No need to call it explicitly here if onMarkupsNodeSelected is robust.
 
     def onMarkupsNodeSelected(self, node):
         logging.debug(
             f"Markups node selection changed to: {node.GetName() if node else 'None'}"
         )
-        self.removeMarkupObservers()
+        self.removeMarkupObservers()  # Clear observers from any previously selected node
 
         if node and isinstance(node, slicer.vtkMRMLMarkupsFiducialNode):
             self._observedMarkupsNode = node
@@ -178,12 +321,61 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                         f"Added observer for {event_name_str} (ID: {event_id}) on node {node.GetName()}"
                     )
 
-            self.ensureMarkupsNodeIsSetup(node)
-            self.markupsPlaceWidget.setCurrentNode(node)
+            self.ensureMarkupsNodeIsSetup(node)  # Setup the node if it's empty
+            self.markupsPlaceWidget.setCurrentNode(node)  # Link the place widget
         else:
-            self.markupsPlaceWidget.setCurrentNode(None)
+            self.markupsPlaceWidget.setCurrentNode(
+                None
+            )  # No valid node selected, clear place widget
+        # Update button state
+        self.updateCalculateTransformButtonState()
 
-        self.updateApplyButtonState()
+    def onNucleiMarkupsNodeSelected(self, node):
+        """ """
+        # Handle observers (mimicing onMarkupsNodeSelected, not sure how necessary this is)
+        logging.debug(
+            f"Markups node selection changed to: {node.GetName() if node else 'None'}"
+        )
+        self.removeNucleiMarkupObservers()  # Clear observers from any previously selected node
+
+        if node and isinstance(node, slicer.vtkMRMLMarkupsFiducialNode):
+            self._observedNucleiMarkupsNode = node
+
+            core_event_ids = [
+                slicer.vtkMRMLMarkupsNode.PointModifiedEvent,
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent,
+                slicer.vtkMRMLMarkupsNode.PointRemovedEvent,
+            ]
+            for event_id in core_event_ids:
+                tag = node.AddObserver(event_id, self.onNucleiMarkupPointModified)
+                self._nucleiMarkupsObserverTags.append(tag)
+                logging.debug(
+                    f"Added observer for event ID {event_id} on node {node.GetName()}"
+                )
+
+            newer_event_names = [
+                "PointPositionDefinedEvent",
+                "PointPositionUndefinedEvent",
+            ]
+            for event_name_str in newer_event_names:
+                if hasattr(
+                    slicer.vtkMRMLMarkupsNode, event_name_str
+                ):  # Check if the attribute (event ID) exists
+                    event_id = getattr(slicer.vtkMRMLMarkupsNode, event_name_str)
+                    tag = node.AddObserver(event_id, self.onNucleiMarkupPointModified)
+                    self._nucleiMarkupsObserverTags.append(tag)
+                    logging.debug(
+                        f"Added observer for {event_name_str} (ID: {event_id}) on node {node.GetName()}"
+                    )
+        # Set up if empty
+        self.ensureNucleiMarkupsNodeIsSetup(node)
+        # Handle related button states
+        self.updateNextPointButtonState()
+        self.updatePreviousPointButtonState()
+        self.updateSaveButtonState()
+
+    def onImageSelected(self):
+        self.updateReorientButtonState()
 
     def ensureMarkupsNodeIsSetup(self, markupsNode):
         if not markupsNode or not isinstance(
@@ -191,6 +383,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         ):
             return
 
+        # Only initialize if the node is completely empty.
         if markupsNode.GetNumberOfControlPoints() == 0:
             logging.info(
                 f"Initializing markups node '{markupsNode.GetName()}' with AC, PC, IH unplaced points."
@@ -198,15 +391,30 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             wasModified = markupsNode.StartModify()
             pointLabels = ["AC", "PC", "IH"]
             for label_text in pointLabels:
-                # Add a control point. It will be initially at (0,0,0) and defined.
-                # AddControlPoint returns the index of the newly added point.
                 newPointIndex = markupsNode.AddControlPoint([0.0, 0.0, 0.0], label_text)
+                markupsNode.UnsetNthControlPointPosition(newPointIndex)
+            markupsNode.EndModify(wasModified)
+            logging.debug(
+                f"Markups node '{markupsNode.GetName()}' initialized. Number of points: {markupsNode.GetNumberOfControlPoints()}"
+            )
+        else:
+            logging.debug(
+                f"Markups node '{markupsNode.GetName()}' not empty ({markupsNode.GetNumberOfControlPoints()} points), skipping auto-setup."
+            )
 
-                # Immediately set its position status to Undefined.
-                markupsNode.UnsetNthControlPointPosition(
-                    newPointIndex
-                )  # CORRECTED LINE
-                # The label is already set by AddControlPoint.
+    def ensureNucleiMarkupsNodeIsSetup(self, markupsNode):
+        if not markupsNode or not isinstance(
+            markupsNode, slicer.vtkMRMLMarkupsFiducialNode
+        ):
+            return
+
+        # Only initialize if the node is completely empty.
+        if markupsNode.GetNumberOfControlPoints() == 0:
+            logging.info(
+                f"Initializing markups node '{markupsNode.GetName()}' with CM, ANT, and unplaced PUL points."
+            )
+            wasModified = markupsNode.StartModify()
+            self.logic.initializeThalNucMarkups(markupsNode)
             markupsNode.EndModify(wasModified)
             logging.debug(
                 f"Markups node '{markupsNode.GetName()}' initialized. Number of points: {markupsNode.GetNumberOfControlPoints()}"
@@ -217,12 +425,32 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             )
 
     def onMarkupPointModified(self, caller, event):
-        logging.debug(
-            f"Markup event (ID: {event}) received from {caller.GetName() if caller and hasattr(caller, 'GetName') else 'UnknownCaller'}"
-        )
-        self.updateApplyButtonState()
+        # Check if caller (node) still exists, as it might be deleted during scene close
+        if slicer.mrmlScene.IsNodePresent(caller):
+            logging.debug(
+                f"Markup event (ID: {event}) received from {caller.GetName()}"
+            )
+            self.updateCalculateTransformButtonState()
+        else:
+            logging.debug(
+                f"Markup event (ID: {event}) received from a deleted node. Ignoring."
+            )
 
-    def updateApplyButtonState(self):
+    def onNucleiMarkupPointModified(self, caller, event):
+        # Check if caller (node) still exists, as it might be deleted during scene close
+        if slicer.mrmlScene.IsNodePresent(caller):
+            logging.debug(
+                f"Markup event (ID: {event}) received from {caller.GetName()}"
+            )
+            self.updateNextPointButtonState()
+            self.updatePreviousPointButtonState()
+            self.updateSaveButtonState()
+        else:
+            logging.debug(
+                f"Markup event (ID: {event}) received from a deleted node. Ignoring."
+            )
+
+    def updateCalculateTransformButtonState(self):
         markupsNode = self.markupsSelector.currentNode()
         outputNode = self.outputTransformSelector.currentNode()
         readyToApply = False
@@ -244,11 +472,53 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                         break
                 if all_points_defined:
                     readyToApply = True
-        self.applyButton.enabled = readyToApply
-        logging.debug(f"Apply button enabled: {readyToApply}")
+        self.calculateTransformButton.enabled = readyToApply
+        logging.debug(f"Calculate Transform button enabled: {readyToApply}")
 
-    def onApplyButton(self):
-        logic = ACPCTransformLogic()
+    def updateReorientButtonState(self):
+        """Enable button if acpc transform and image nodes are selected"""
+        transformNode = self.outputTransformSelector.currentNode()
+        imageNode = self.imageSelector.currentNode()
+        readyToApply = False
+        if transformNode and imageNode:
+            readyToApply = True
+        self.reorientButton.enabled = readyToApply
+        logging.debug(f"Reorient button enabled: {readyToApply}")
+
+    def updateNextPointButtonState(self):
+        """Enable button if there is a nuclei markups node selected"""
+        markupsNode = self.nucleiMarkupsSelector.currentNode()
+        readyToApply = False
+        if markupsNode:
+            readyToApply = True
+        self.nextPointButton.enabled = readyToApply
+        logging.debug(f"Next Point button enabled: {readyToApply}")
+
+    def updatePreviousPointButtonState(self):
+        """Enable button if there is a nuclei markups node selected"""
+        markupsNode = self.nucleiMarkupsSelector.currentNode()
+        readyToApply = False
+        if markupsNode:
+            readyToApply = True
+        self.previousPointButton.enabled = readyToApply
+        logging.debug(f"Previous Point button enabled: {readyToApply}")
+
+    def updateSaveButtonState(self):
+        """Enable button if there is a nuclei markups node selected"""
+        markupsNode = self.nucleiMarkupsSelector.currentNode()
+        readyToApply = False
+        if markupsNode:
+            readyToApply = True
+        self.previousPointButton.enabled = readyToApply
+        logging.debug(f"Save button enabled: {readyToApply}")
+
+    def updateNucleiTemplateButtonState(self, enabled=True):
+        """Update enabled state of the nuclei template creation
+        button according to the enabled flag input
+        """
+        self.createNucleiTemplateButton.enabled = enabled
+
+    def onCalculateTransformButton(self):
         inputMarkupsNode = self.markupsSelector.currentNode()
         outputTransformNode = self.outputTransformSelector.currentNode()
 
@@ -282,13 +552,87 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             )
             return
 
-        logic.run(inputMarkupsNode, outputTransformNode)
+        self.logic.run(inputMarkupsNode, outputTransformNode)
+
+    def onCreateNucleiTemplateButton(self):
+        logging.debug("onCreateNucleiTemplateButton called")
+        baseName = (
+            self.nucleiMarkupsSelector.baseName
+            if self.nucleiMarkupsSelector.baseName
+            else "ACPCSites_New"
+        )
+        newNodeName = slicer.mrmlScene.GenerateUniqueName(baseName)
+
+        newNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsFiducialNode", newNodeName
+        )
+        if not newNode:
+            logging.error(f"Failed to create new markups node: {newNodeName}")
+            slicer.util.errorDisplay(
+                f"Could not create new Markups Fiducial node: {newNodeName}"
+            )
+            return
+
+        logging.info(f"Created new markups node via button: {newNode.GetName()}")
+
+        # ensureMarkupsNodeIsSetup will populate AC, PC, IH
+        # onNucleiMarkupsNodeSelected (triggered by setCurrentNode) will also call ensureMarkupsNodeIsSetup.
+        # To avoid double setup or issues if ensureMarkupsNodeIsSetup isn't idempotent for an empty node,
+        # we can call it directly here, and onNucleiMarkupsNodeSelected will correctly link observers and place widget.
+        self.ensureNucleiMarkupsNodeIsSetup(newNode)
+
+        self.nucleiMarkupsSelector.setCurrentNode(newNode)
+        # setCurrentNode will trigger onNucleiMarkupsNodeSelected, which will:
+        # 1. Set up observers
+        # 2. Call ensureNucleiMarkupsNodeIsSetup again (it's safe as it checks for empty node)
+        # 3. Update button states
+
+    def onReorientButton(self):
+        """Apply AC-PC transform to the selected image, as well as the
+        AC,PC,IH points.  Maybe force this onto any ThalamicNuclei node
+        (and any other image, model, and markups nodes in the scene?)
+        as well (to make sure they stay in sync with the image used).
+        Any initial transform hierarchy is hardened first, then the AC-PC
+        Transform is applied and hardened.
+        """
+        # Harden any existing soft transforms on images, models, and markups
+        self.logic.hardenAllTransforms()
+        acpcTransformNode = self.outputTransformSelector.currentNode()
+        self.logic.applyTransformToAll(acpcTransformNode)
+        self.logic.reorientSlices()
+        self.jumpToPC()
+        self.updateNucleiTemplateButtonState(enabled=True)
+
+    def jumpToPC(self):
+        """Jump slice views to the posterior commissure point"""
+        acpcMarkup = self.markupsSelector.currentNode()
+        pcPos = acpcMarkup.GetNthControlPointPositionWorld(1)
+        self.logic.jumpToPosition(pcPos)
+
+    def onNextPointButton(self):
+        nucleiMarkup = self.nucleiMarkupsSelector.currentNode()
+        self.logic.jumpToNextPoint(nucleiMarkup)
+
+    def onPreviousPointButton(self):
+        nucleiMarkup = self.nucleiMarkupsSelector.currentNode()
+        self.logic.jumpToPreviousPoint(nucleiMarkup)
+
+    def onSaveButton(self):
+        # idea: save thalNuclei ijkToRas matrix as a way to
+        # link studies processed in different orders?
+        self.logic.save(
+            acpcMarkup,
+            nucleiMarkup,
+        )
 
 
 #
 # ACPCTransformLogic (Unchanged)
 #
 class ACPCTransformLogic(ScriptedLoadableModuleLogic):
+    def __init__(self):
+        self._currentPointIdx = None
+
     def createACPCTransformMatrix(self, p_ac_np, p_pc_np, p_ih_np):
         logging.info("Calculating AC-PC transform matrix.")
         logging.info(f"AC: {p_ac_np}, PC: {p_pc_np}, IH: {p_ih_np}")
@@ -423,6 +767,117 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         logging.info("AC-PC Transform logic finished.")
         return True
 
+    def initializeThalNucMarkups(self, markupsNode):
+        """Initialize thalamic nuclei markups node using AC-PC standardized
+        coordinates. Pulvinar landmarks are named but unplaced.
+        """
+        markupsNode.RemoveAllControlPoints()
+        ANT_R = (3.8 + 5.85) / 2  # +4.82
+        ANT_A = -(2.1 + 6.35) / 2  # -4.225
+        ANT_S = (6.2 + 10.1) / 2  # +8.15
+        defaultCoords = {
+            "LCM": (-9.0, -4.5, 1.0),
+            "RCM": (9.0, -4.5, 1.0),
+            "LANT": (-ANT_R, ANT_A, ANT_S),
+            "RANT": (ANT_R, ANT_A, ANT_S),
+            "LPUL": None,
+            "RPUL": None,
+        }
+        markupsFromDict(defaultCoords, markupsNode)
+
+    def hardenAllTransforms(self):
+        """Harden all soft transforms on image, model, and markups nodes.
+        This simplifies the scene and prepares for application of
+        scene-wide AC-PC transform.  If we don't do this, then it
+        is much harder to allow adjustments to AC-PC-IH points and
+        recalculation of the transform.
+        """
+        nodesToHarden = self.gatherNodesToHarden()
+        for node in nodesToHarden:
+            logging.debug(f"Hardening pre-existing Transform on {node.GetName()}")
+            node.HardenTransform()
+
+    def gatherNodesToHarden(self):
+        scene = slicer.mrmlScene
+        imageNodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode", scene)
+        labelNodes = slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode", scene)
+        modelNodes = slicer.util.getNodesByClass("vtkMRMLModelNode", scene)
+        markupsNodes = slicer.util.getNodesByClass("vtkMRMLMarkupsNode", scene)
+        # note, this gets all types of markups nodes ^^
+        nodesToHarden = []
+        nodesToHarden.extend(imageNodes)
+        nodesToHarden.extend(labelNodes)
+        nodesToHarden.extend(modelNodes)
+        nodesToHarden.extend(markupsNodes)
+        # We need to remove hidden nodes from the list before passing it on
+        nodesToHarden = [
+            node for node in nodesToHarden if node.GetHideFromEditors() == 0
+        ]
+        return nodesToHarden
+
+    def applyTransformToAll(self, transformNode):
+        """Apply the supplied transform to all image, labelmap, model,
+        and markups nodes, and harden it.
+        """
+        nodes = self.gatherNodesToHarden()
+        for node in nodes:
+            logging.debug(f"Adding AC-PC transform to {node.GetName()}")
+            node.SetAndObserveTransformNodeID(transformNode.GetID())
+            node.HardenTransform()
+
+    def reorientSlices(self):
+        """Orient the red, yellow, and green slice views to axial,
+        sagittal, and coronal, respecively
+        """
+        slicer.util.getNode("vtkMRMLSliceNodeRed").SetOrientation("Axial")
+        slicer.util.getNode("vtkMRMLSliceNodeYellow").SetOrientation("Sagittal")
+        slicer.util.getNode("vtkMRMLSliceNodeGreen").SetOrientation("Coronal")
+
+    def jumpToNextPoint(self, nucleiMarkup, lockCurrent=True):
+        maxIdx = nucleiMarkup.GetNumberOfControlPoints() - 1
+        nextIdx = self._currentPointIdx + 1
+        if nextIdx > maxIdx:
+            nextIdx = 0
+        if lockCurrent:
+            nucleiMarkup.SetNthControlPointLocked(self._currentPointIdx, True)
+        self.jumpToPointIdx(nextIdx, nucleiMarkup)
+
+    def jumpToPointIdx(self, idx, markupsNode):
+        """Jumps all slicer to the idx control point of the given markups node.
+        If the point is not placed, instead of jumping to it, it is selected
+        and we switch in to markups point placement mode to place the point.
+        """
+        if idx < 0 or idx > (markupsNode.GetNumberOfControlPoints() - 1):
+            raise Exception(
+                f"Illegal control point index {idx} for markups node named {markupsNode.GetName()}"
+            )
+        # Unlock the point so it could be dragged
+        markupsNode.SetNthControlPointLocked(idx, False)
+        # Check if the point position is undefined
+        status = markupsNode.GetNthControlPointPositionStatus(idx)
+        if status == markupsNode.PostionUndefined:
+            # Don't use the position, it's meaningless, instead switch
+            # to placement mode to place this point
+            markupsNode.SetControlPointPlacementStartIndex(idx)
+            placeModePersistence = 0  # not persistent
+            slicer.modules.markups.logic().StartPlaceMode(placeModePersistence)
+        else:
+            # Get the position and jump to it
+            pos = markupsNode.GetNthControlPointPositionWorld(idx)
+            # Jump all slices to this point (currently offset, not centered)
+            self.jumpToPosition(pos)
+
+    def jumpToPosition(self, pos, centered=False):
+        """Jump all slices to postion given.  Slice views are
+        centered if centered=True, offset otherwise (default).
+        """
+        jumpMode = (
+            slicer.vtkMRMLSliceNode.CenteredJumpSlice
+            if centered
+            else slice.vtkMRMLSliceNode.OffsetJumpSlice
+        )
+        slicer.vtkMRMLSliceNode.JumpAllSlices(slicer.mrmlScene, *pos, jumpMode)
+
 
 #
 # ACPCTransformTest
@@ -457,8 +912,6 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
 
         # Simulate point placement by user
         markupsNode.SetNthControlPointPositionWorld(0, ac_coords)
-        # SetNthControlPointPositionWorld also sets status to PositionDefined by default
-        # but to be explicit for testing:
         markupsNode.SetNthControlPointPositionStatus(
             0, slicer.vtkMRMLMarkupsNode.PositionDefined
         )
@@ -523,3 +976,20 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
                     msg=f"Elem ({r},{c})",
                 )
         self.delayDisplay("AC-PC Transform test passed")
+
+
+####### Helper Functions #######
+def markupsFromDict(coordDict, outputMarkupsNode):
+    """Create markups control points from dict where
+    point labels are the keys and coords are the values.
+    A None value triggers creation of a point with given
+    label but unset (undefined) position.
+    """
+    outputMarkupsNode.RemoveAllControlPoints()
+    for label, coord in coordDict.items():
+        cpIdx = outputMarkupsNode.AddControlPoint(0, 0, 0, label)
+        if coord is None:
+            # unset the postion
+            outputMarkupsNode.UnsetNthControlPointPosition(cpIdx)
+        else:
+            outputMarkupsNode.SetNthControlPointPositionWorld(cpIdx, *coord)
