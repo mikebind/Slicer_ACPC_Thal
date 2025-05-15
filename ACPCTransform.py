@@ -53,6 +53,16 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self._markupsObserverTags = []
         self._observedNucleiMarkupsNode = None
         self._nucleiMarkupsObserverTags = []
+        self.initializeNodes()
+
+    def initializeNodes(self):
+        """Create the required AC-PC related transformation nodes"""
+        self._netACPCTransformNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLLinearTransformNode", "Total_ACPC_Transform"
+        )
+        self._incrementalACPCTransformNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLLinearTransformNode", "Step_ACPC_Transform"
+        )
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -100,49 +110,9 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.markupsPlaceWidget.buttonsVisible = True
         parametersFormLayout.addRow("Place Points:", self.markupsPlaceWidget)
 
-        # Output Transform Node Selector
-        self.outputTransformSelector = slicer.qMRMLNodeComboBox()
-        self.outputTransformSelector.nodeTypes = ["vtkMRMLTransformNode"]
-        self.outputTransformSelector.selectNodeUponCreation = False
-        self.outputTransformSelector.addEnabled = True
-        self.outputTransformSelector.removeEnabled = True
-        self.outputTransformSelector.renameEnabled = True
-        self.outputTransformSelector.noneEnabled = (
-            False  # An output must be selected/created for apply
-        )
-        self.outputTransformSelector.showHidden = False
-        self.outputTransformSelector.showChildNodeTypes = False
-        self.outputTransformSelector.setMRMLScene(slicer.mrmlScene)
-        self.outputTransformSelector.setToolTip(
-            "Select or create the output AC-PC transform node."
-        )
-        self.outputTransformSelector.baseName = "ACPCTransform"
-        parametersFormLayout.addRow(
-            "Output AC-PC Transform: ", self.outputTransformSelector
-        )
-
-        # Calculate Button
-        self.calculateTransformButton = qt.QPushButton("Calculate ACPC Transform")
-        self.calculateTransformButton.toolTip = "Run the AC-PC transform calculation."
-        self.calculateTransformButton.enabled = False
-        parametersFormLayout.addRow(self.calculateTransformButton)
-        # Image Selector
-        self.imageSelector = slicer.qMRMLNodeComboBox()
-        self.imageSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
-        self.imageSelector.selectNodeUponCreation = False
-        self.imageSelector.addEnabled = False
-        self.imageSelector.removeEnabled = True
-        self.imageSelector.renameEnabled = True
-        self.imageSelector.noneEnabled = True
-        self.imageSelector.showHidden = False
-        self.imageSelector.showChildNodeTypes = False
-        self.imageSelector.setMRMLScene(slicer.mrmlScene)
-        self.imageSelector.setToolTip("Select image to transform")
-        parametersFormLayout.addRow("Image to transform: ", self.imageSelector)
-
         # Reorient Image Button
         self.reorientButton = qt.QPushButton("Reorient")
-        self.reorientButton.toolTip = "Reorient image and landmarks"
+        self.reorientButton.toolTip = "Reorient AC-PC"
         self.reorientButton.enabled = False
         parametersFormLayout.addRow(self.reorientButton)
         # Create Nuclei Template Button
@@ -188,6 +158,9 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow(self.previousPointButton)
         # Save button
         self.saveButton = qt.QPushButton("Save Final Locations")
+        self.saveButton.toolTip = "Save results to files (also clears scene!)"
+        self.saveButton.enabled = True
+        parametersFormLayout.addRow(self.saveButton)
 
         # Connections
         self.createTemplateButton.connect(
@@ -198,15 +171,6 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         )
         self.markupsSelector.connect(
             "nodeAddedByUser(vtkMRMLNode*)", self.onMarkupsNodeAddedByUser
-        )
-        self.outputTransformSelector.connect(
-            "currentNodeChanged(vtkMRMLNode*)", self.updateCalculateTransformButtonState
-        )
-        self.calculateTransformButton.connect(
-            "clicked(bool)", self.onCalculateTransformButton
-        )
-        self.imageSelector.connect(
-            "currentNodeChanged(vtkMRMLNode*)", self.onImageSelected
         )
         self.reorientButton.connect("clicked(bool)", self.onReorientButton)
         self.createNucleiTemplateButton.connect(
@@ -225,11 +189,11 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             self.onMarkupsNodeSelected(self.markupsSelector.currentNode())
         else:  # Ensure place widget is cleared if no node is selected initially
             self.markupsPlaceWidget.setCurrentNode(None)
-        self.updateCalculateTransformButtonState()
 
     def cleanup(self):
         ScriptedLoadableModuleWidget.cleanup(self)
         self.removeMarkupObservers()
+        self.removeNucleiMarkupObservers()
 
     def removeMarkupObservers(self):
         if self._observedMarkupsNode and self._markupsObserverTags:
@@ -243,7 +207,19 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self._observedMarkupsNode = None
         self._markupsObserverTags = []
 
-    def onCreateACPCTemplateNode(self):  # --- NEW METHOD ---
+    def removeNucleiMarkupObservers(self):
+        if self._observedNucleiMarkupsNode and self._nucleiMarkupsObserverTags:
+            for tag in self._nucleiMarkupsObserverTags:
+                try:
+                    self._observedNucleiMarkupsNode.RemoveObserver(tag)
+                except AttributeError:
+                    logging.debug(
+                        "Could not remove observer, node might be already deleted."
+                    )
+        self._observedNucleiMarkupsNode = None
+        self._nucleiMarkupsObserverTags = []
+
+    def onCreateACPCTemplateNode(self):
         logging.debug("onCreateACPCTemplateNode called")
         baseName = (
             self.markupsSelector.baseName
@@ -269,6 +245,8 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         # To avoid double setup or issues if ensureMarkupsNodeIsSetup isn't idempotent for an empty node,
         # we can call it directly here, and onMarkupsNodeSelected will correctly link observers and place widget.
         self.ensureMarkupsNodeIsSetup(newNode)
+        # Set some convenient display properties
+        self.logic.standardizeACPCDisplay(newNode)
 
         self.markupsSelector.setCurrentNode(newNode)
         # setCurrentNode will trigger onMarkupsNodeSelected, which will:
@@ -328,7 +306,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                 None
             )  # No valid node selected, clear place widget
         # Update button state
-        self.updateCalculateTransformButtonState()
+        self.updateReorientButtonState()
 
     def onNucleiMarkupsNodeSelected(self, node):
         """ """
@@ -373,9 +351,6 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.updateNextPointButtonState()
         self.updatePreviousPointButtonState()
         self.updateSaveButtonState()
-
-    def onImageSelected(self):
-        self.updateReorientButtonState()
 
     def ensureMarkupsNodeIsSetup(self, markupsNode):
         if not markupsNode or not isinstance(
@@ -430,7 +405,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             logging.debug(
                 f"Markup event (ID: {event}) received from {caller.GetName()}"
             )
-            self.updateCalculateTransformButtonState()
+            self.updateReorientButtonState()
         else:
             logging.debug(
                 f"Markup event (ID: {event}) received from a deleted node. Ignoring."
@@ -450,40 +425,41 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                 f"Markup event (ID: {event}) received from a deleted node. Ignoring."
             )
 
-    def updateCalculateTransformButtonState(self):
-        markupsNode = self.markupsSelector.currentNode()
-        outputNode = self.outputTransformSelector.currentNode()
-        readyToApply = False
-
-        if (
-            markupsNode
-            and isinstance(markupsNode, slicer.vtkMRMLMarkupsFiducialNode)
-            and outputNode
-            and isinstance(outputNode, slicer.vtkMRMLTransformNode)
-        ):
-            if markupsNode.GetNumberOfControlPoints() == 3:
-                all_points_defined = True
-                for i in range(3):
-                    if (
-                        markupsNode.GetNthControlPointPositionStatus(i)
-                        == slicer.vtkMRMLMarkupsNode.PositionUndefined
-                    ):
-                        all_points_defined = False
-                        break
-                if all_points_defined:
-                    readyToApply = True
-        self.calculateTransformButton.enabled = readyToApply
-        logging.debug(f"Calculate Transform button enabled: {readyToApply}")
-
     def updateReorientButtonState(self):
-        """Enable button if acpc transform and image nodes are selected"""
-        transformNode = self.outputTransformSelector.currentNode()
-        imageNode = self.imageSelector.currentNode()
-        readyToApply = False
-        if transformNode and imageNode:
-            readyToApply = True
-        self.reorientButton.enabled = readyToApply
-        logging.debug(f"Reorient button enabled: {readyToApply}")
+        """Enable Reorient whenever there are 3 AC-PC-IH points and they aren't aligned
+        properly (coords within 1e-4 of expected).  Disable and change label to
+        "Already Oriented" if properly aligned.  Keep label Reorient but disabled
+        if not 3 placed points yet.
+        """
+        markupsNode = self.markupsSelector.currentNode()
+        pointsDefinedFlag = self.logic.checkPointsDefined(markupsNode)
+        if pointsDefinedFlag:
+            alignedFlag = self.logic.checkAligned(markupsNode)
+            if alignedFlag:
+                # Already oriented, disable and label
+                self.reorientButton.enabled = False
+                self.reorientButton.text = "Already AC-PC Oriented"
+                self.reorientButton.toolTip = (
+                    "AC-PC-IH points indicate that orientation is already correct"
+                )
+                logging.debug(
+                    "Reorient button state: disabled due to existing correct orientation"
+                )
+                self.updateNucleiTemplateButtonState()
+            else:
+                # Points defined but not aligned
+                self.reorientButton.enabled = True
+                self.reorientButton.text = "Reorient to AC-PC"
+                self.reorientButton.toolTip = "Use AC-PC-IH points to reorient all images, models, and markups to AC-PC coordinate system"
+                logging.debug("Reorient button state: enabled")
+        else:
+            # Points not defined yet
+            self.reorientButton.enabled = False
+            self.reorientButton.text = "Reorient to AC-PC"
+            self.reorientButton.toolTip = (
+                "Select AC, PC, and IH points to enable reorientation"
+            )
+            logging.debug("Reorient button state: disabled due to missing point(s)")
 
     def updateNextPointButtonState(self):
         """Enable button if there is a nuclei markups node selected"""
@@ -509,14 +485,39 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         readyToApply = False
         if markupsNode:
             readyToApply = True
-        self.previousPointButton.enabled = readyToApply
+        self.saveButton.enabled = readyToApply
         logging.debug(f"Save button enabled: {readyToApply}")
 
-    def updateNucleiTemplateButtonState(self, enabled=True):
+    def updateNucleiTemplateButtonState(self):
         """Update enabled state of the nuclei template creation
-        button according to the enabled flag input
+        button according to whether acpc points are defined and
+        aligned
         """
-        self.createNucleiTemplateButton.enabled = enabled
+        markupsNode = self.markupsSelector.currentNode()
+        button = self.createNucleiTemplateButton
+        pointsDefinedFlag = False
+        alignedFlag = False
+        if markupsNode:
+            pointsDefinedFlag = self.logic.checkPointsDefined(markupsNode)
+        if pointsDefinedFlag:
+            alignedFlag = self.logic.checkAligned(markupsNode)
+        enableFlag = pointsDefinedFlag and alignedFlag
+        button.enabled = enableFlag
+        if enableFlag:
+            button.toolTip = (
+                "Create markups template for Thalamic Nuclei in default locations"
+            )
+            logging.debug("Create Nuclei Template button enabled: True")
+        elif not pointsDefinedFlag:
+            button.toolTip = "Define AC-PC-IH points and reorient to enable!"
+            logging.debug(
+                "Create Nuclei Template button enabled: False (points missing)"
+            )
+        elif not alignedFlag:
+            button.toolTip = "Reorient to enable!"
+            logging.debug(
+                "Create Nuclei Template button enabled: False (reorientation needed)"
+            )
 
     def onCalculateTransformButton(self):
         inputMarkupsNode = self.markupsSelector.currentNode()
@@ -552,7 +553,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             )
             return
 
-        self.logic.run(inputMarkupsNode, outputTransformNode)
+        self.logic.calculateACPCTransform(inputMarkupsNode, outputTransformNode)
 
     def onCreateNucleiTemplateButton(self):
         logging.debug("onCreateNucleiTemplateButton called")
@@ -580,6 +581,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         # To avoid double setup or issues if ensureMarkupsNodeIsSetup isn't idempotent for an empty node,
         # we can call it directly here, and onNucleiMarkupsNodeSelected will correctly link observers and place widget.
         self.ensureNucleiMarkupsNodeIsSetup(newNode)
+        self.logic.standardizeNucleiPointsDisplay(newNode)
 
         self.nucleiMarkupsSelector.setCurrentNode(newNode)
         # setCurrentNode will trigger onNucleiMarkupsNodeSelected, which will:
@@ -588,20 +590,31 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         # 3. Update button states
 
     def onReorientButton(self):
-        """Apply AC-PC transform to the selected image, as well as the
-        AC,PC,IH points.  Maybe force this onto any ThalamicNuclei node
-        (and any other image, model, and markups nodes in the scene?)
-        as well (to make sure they stay in sync with the image used).
+        """Calculate, then apply, AC-PC transform to everything (all
+        image, labelmap, model, and markups nodes).
         Any initial transform hierarchy is hardened first, then the AC-PC
         Transform is applied and hardened.
         """
+        acpcMarkupsNode = self.markupsSelector.currentNode()
+        # Calculate the transform
+        acpcTransformNode = self.logic.calculateACPCTransform(acpcMarkupsNode)
+        self._incrementalACPCTransformNode = acpcTransformNode
+        # Add incremental transformation to the net transformation
+        self._netACPCTransformNode.SetAndObserveTransformNodeID(
+            acpcTransformNode.GetID()
+        )
+        self._netACPCTransformNode.HardenTransform()
+
         # Harden any existing soft transforms on images, models, and markups
         self.logic.hardenAllTransforms()
-        acpcTransformNode = self.outputTransformSelector.currentNode()
+        # Apply the acpc transform to everything
         self.logic.applyTransformToAll(acpcTransformNode)
+        # Lock AC-PC markups so no accidental modification
+        self.logic.lockAllControlPoints(acpcMarkupsNode)
+        # Align slice views, jump to center on PC, enable nuclei template button
         self.logic.reorientSlices()
         self.jumpToPC()
-        self.updateNucleiTemplateButtonState(enabled=True)
+        self.updateNucleiTemplateButtonState()
 
     def jumpToPC(self):
         """Jump slice views to the posterior commissure point"""
@@ -618,12 +631,35 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.logic.jumpToPreviousPoint(nucleiMarkup)
 
     def onSaveButton(self):
+        """What needs to be saved?
+        * AC-PC coordinates of each nucleus, which is just the
+          nucleiMarkup control point positions.
+        * Net AC-PC transformation matrix
+        * Might as well also save AC-PC points
+        """
+        from slicer.util import infoDisplay
+
+        acpcMarkup = self.markupsSelector.currentNode()
+        nucleiMarkup = self.nucleiMarkupsSelector.currentNode()
         # idea: save thalNuclei ijkToRas matrix as a way to
         # link studies processed in different orders?
-        self.logic.save(
-            acpcMarkup,
-            nucleiMarkup,
+        self.logic.save(acpcMarkup, nucleiMarkup, self._netACPCTransformNode)
+        infoDisplay(
+            f"Results saved! The scene will be cleared to prepare for loading the next case."
         )
+        self.reset()
+
+    def reset(self):
+        """Reset the state of the module to be able to start a new
+        case from a clean slate. Close the scene, reset counters, remove
+        observers, then re-intialize.
+        """
+        self.removeMarkupObservers()
+        self.removeNucleiMarkupObservers()
+        slicer.mrmlScene.Clear()
+        # Re-intialize
+        self.initializeNodes()
+        self.logic._currentPointIdx = None
 
 
 #
@@ -704,15 +740,12 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         logging.info("Successfully created AC-PC transform matrix.")
         return matrix
 
-    def run(self, inputMarkupsNode, outputTransformNode):
+    def calculateACPCTransform(self, inputMarkupsNode):
         logging.info("AC-PC Transform logic started.")
-
-        if not inputMarkupsNode or not outputTransformNode:
-            logging.error("Invalid input or output node for logic.")
-            slicer.util.errorDisplay(
-                "Invalid input or output node provided to the logic."
-            )
-            return False
+        scene = slicer.mrmlScene
+        outputTransformNode = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode")
+        uniqName = scene.GenerateUniqueName("AC_PC_Transform")
+        outputTransformNode.SetName(uniqName)
 
         if inputMarkupsNode.GetNumberOfControlPoints() != 3:
             errorMsg = (
@@ -721,7 +754,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             )
             logging.error(errorMsg)
             slicer.util.errorDisplay(errorMsg)
-            return False
+            return None
 
         p_ac_world = np.zeros(3)
         inputMarkupsNode.GetNthControlPointPositionWorld(0, p_ac_world)
@@ -730,7 +763,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             == slicer.vtkMRMLMarkupsNode.PositionUndefined
         ):
             slicer.util.errorDisplay("AC point has not been placed.")
-            return False
+            return None
 
         p_pc_world = np.zeros(3)
         inputMarkupsNode.GetNthControlPointPositionWorld(1, p_pc_world)
@@ -739,7 +772,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             == slicer.vtkMRMLMarkupsNode.PositionUndefined
         ):
             slicer.util.errorDisplay("PC point has not been placed.")
-            return False
+            return None
 
         p_ih_world = np.zeros(3)
         inputMarkupsNode.GetNthControlPointPositionWorld(2, p_ih_world)
@@ -748,7 +781,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             == slicer.vtkMRMLMarkupsNode.PositionUndefined
         ):
             slicer.util.errorDisplay("IH point has not been placed.")
-            return False
+            return None
 
         transformMatrix = self.createACPCTransformMatrix(
             p_ac_world, p_pc_world, p_ih_world
@@ -758,14 +791,86 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             logging.error(
                 "Failed to create AC-PC transform matrix (error already displayed)."
             )
-            return False
+            return None
 
         outputTransformNode.SetMatrixTransformToParent(transformMatrix)
         successMsg = f"AC-PC transform '{outputTransformNode.GetName()}' successfully created/updated."
         logging.info(successMsg)
-        slicer.util.infoDisplay(successMsg)
+        # slicer.util.infoDisplay(successMsg)
         logging.info("AC-PC Transform logic finished.")
-        return True
+        return outputTransformNode
+
+    def standardizeACPCDisplay(self, markupsNode):
+        """Set display node properties for marksupsNode"""
+        markupsNode.CreateDefaultDisplayNodes()
+        dn = markupsNode.GetDisplayNode()
+        dn.SetGlyphScale(1)
+        dn.SetUseGlyphScale(True)
+        dn.SetSelectedColor((1.0, 0.0, 0.0))  # red
+
+    def standardizeNucleiPointsDisplay(self, markupsNode):
+        """Set display node properties for marksupsNode"""
+        markupsNode.CreateDefaultDisplayNodes()
+        dn = markupsNode.GetDisplayNode()
+        dn.SetGlyphScale(1)
+        dn.SetUseGlyphScale(True)
+        dn.SetSelectedColor((0.0, 1.0, 1.0))  # cyan
+
+    def checkPointsDefined(self, markupsNode):
+        """Check that there are 3 points and they have defined positions.
+        Return true if both conditions satisfied.
+        """
+        if not markupsNode:
+            return False
+        atLeastThreePoints = markupsNode.GetNumberOfControlPoints() >= 3
+        if atLeastThreePoints:
+            pointsDefined = True
+            for idx in range(3):
+                if (
+                    markupsNode.GetNthControlPointPositionStatus(idx)
+                    == slicer.vtkMRMLMarkupsNode.PositionUndefined
+                ):
+                    pointsDefined = False
+                    break
+            return pointsDefined
+        else:
+            return False
+
+    def checkAligned(self, markupsNode, tol=1e-4):
+        """Check whether the first three control points of the markups node
+        look like they could be the AC, PC, IH points in the AC PC coordinate
+        system. The conditions checked are
+         * AC and PC points have |R| and |S| coordinates < tol
+         * AC and PC, A coordinate average < tol (origin should be MCP)
+         * IH should have S coord > 0 and |R| coord < tol
+        If all conditions are met, returns True, else returns False
+        """
+        if not markupsNode:
+            return False
+        pts = slicer.util.arrayFromMarkupsControlPoints(markupsNode, world=True)
+        AC = pts[0]
+        PC = pts[1]
+        IH = pts[2]
+        aligned = True
+        if not all(
+            (
+                np.abs(AC[0]) < tol,  # AC on R=0 plane
+                np.abs(PC[0]) < tol,  # PC on R=0 plane
+                np.abs(AC[2]) < tol,  # AC on S=0 plane
+                np.abs(PC[2]) < tol,  # PC on S=0 plane
+                np.abs(AC[1] + PC[1]) < tol,  # MCP origin
+                AC[1] > PC[1],  # AC anterior of PC
+                np.abs(IH[0]) < tol,  # IH on R=0 plane
+                IH[2] > 0,  # IH superior to AC-PC
+            )
+        ):
+            # One or more alignment conditions failed
+            aligned = False
+        return aligned
+
+    def lockAllControlPoints(self, markupsNode):
+        for cpIdx in range(markupsNode.GetNumberOfControlPoints()):
+            markupsNode.SetNthControlPointLocked(cpIdx, True)
 
     def initializeThalNucMarkups(self, markupsNode):
         """Initialize thalamic nuclei markups node using AC-PC standardized
@@ -835,12 +940,27 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
 
     def jumpToNextPoint(self, nucleiMarkup, lockCurrent=True):
         maxIdx = nucleiMarkup.GetNumberOfControlPoints() - 1
-        nextIdx = self._currentPointIdx + 1
+        if self._currentPointIdx is None:
+            nextIdx = 0
+        else:
+            nextIdx = self._currentPointIdx + 1
         if nextIdx > maxIdx:
             nextIdx = 0
-        if lockCurrent:
+        if lockCurrent and (self._currentPointIdx is not None):
             nucleiMarkup.SetNthControlPointLocked(self._currentPointIdx, True)
         self.jumpToPointIdx(nextIdx, nucleiMarkup)
+
+    def jumpToPreviousPoint(self, nucleiMarkup, lockCurrent=True):
+        maxIdx = nucleiMarkup.GetNumberOfControlPoints() - 1
+        if self._currentPointIdx is None:
+            prevIdx = maxIdx
+        else:
+            prevIdx = self._currentPointIdx - 1
+        if prevIdx < 0:
+            prevIdx = maxIdx
+        if lockCurrent and (self._currentPointIdx is not None):
+            nucleiMarkup.SetNthControlPointLocked(self._currentPointIdx, True)
+        self.jumpToPointIdx(prevIdx, nucleiMarkup)
 
     def jumpToPointIdx(self, idx, markupsNode):
         """Jumps all slicer to the idx control point of the given markups node.
@@ -855,7 +975,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         markupsNode.SetNthControlPointLocked(idx, False)
         # Check if the point position is undefined
         status = markupsNode.GetNthControlPointPositionStatus(idx)
-        if status == markupsNode.PostionUndefined:
+        if status == slicer.vtkMRMLMarkupsNode.PositionUndefined:
             # Don't use the position, it's meaningless, instead switch
             # to placement mode to place this point
             markupsNode.SetControlPointPlacementStartIndex(idx)
@@ -866,6 +986,8 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             pos = markupsNode.GetNthControlPointPositionWorld(idx)
             # Jump all slices to this point (currently offset, not centered)
             self.jumpToPosition(pos)
+        # Update current point index
+        self._currentPointIdx = idx
 
     def jumpToPosition(self, pos, centered=False):
         """Jump all slices to postion given.  Slice views are
@@ -874,9 +996,88 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         jumpMode = (
             slicer.vtkMRMLSliceNode.CenteredJumpSlice
             if centered
-            else slice.vtkMRMLSliceNode.OffsetJumpSlice
+            else slicer.vtkMRMLSliceNode.OffsetJumpSlice
         )
         slicer.vtkMRMLSliceNode.JumpAllSlices(slicer.mrmlScene, *pos, jumpMode)
+
+    def save(self, acpcMarkup, nucleiMarkup, netACPCTransformNode):
+        """Save information from these to files.  Also make a table node
+        and save as CSV.  Open dialog to choose folder to save to, but
+        have sensible default.
+        """
+        from pathlib import Path
+        from slicer.util import saveNode, arrayFromMarkupsControlPoints
+
+        subFolderName = "DirectTargetingData"
+        qtParent = None
+        startDir = slicer.mrmlScene.GetRootDirectory()
+        caption = "Select Existing Folder to Save Results Under..."
+        chosenFolder = qt.QFileDialog.getExistingDirectory(qtParent, caption, startDir)
+        saveDir = Path(chosenFolder, subFolderName)
+        # Create directory if missing
+        saveDir.mkdir(parents=True, exist_ok=True)
+        # Save
+        suffix = ""
+        testName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
+        counter = 1
+        while testName.exists():
+            suffix = f"_{counter}"
+            testName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
+            counter = counter + 1
+
+        acpcPointsFilePath = Path(saveDir, f"acpcPoints{suffix}.mrk.json")
+        nucleiFileName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
+        transformFileName = Path(saveDir, f"ACPC_TransformNode{suffix}.tfm")
+
+        saveNode(acpcMarkup, filename=str(acpcPointsFilePath))
+        logging.info(f"Saved to {acpcPointsFilePath}")
+        saveNode(nucleiMarkup, filename=str(nucleiFileName))
+        logging.info(f"Saved to {nucleiFileName}")
+        saveNode(netACPCTransformNode, filename=str(transformFileName))
+        logging.info(f"Saved to {transformFileName}")
+        # Make a table node?
+        # Columns are Label, R, A, S; rows are AC, PC, IH, LANT, RANT
+        acpc_arr = arrayFromMarkupsControlPoints(acpcMarkup)
+        acpc_labels = [
+            acpcMarkup.GetNthControlPointLabel(idx)
+            for idx in range(acpcMarkup.GetNumberOfControlPoints())
+        ]
+        nuclei_arr = arrayFromMarkupsControlPoints(nucleiMarkup)
+        nuclei_labels = [
+            nucleiMarkup.GetNthControlPointLabel(idx)
+            for idx in range(nucleiMarkup.GetNumberOfControlPoints())
+        ]
+        # Actually should really add a check here for unplaced points on nuclei markup
+        labelCol = vtk.vtkStringArray()
+        labelCol.SetName("Label")
+        RCol = vtk.vtkFloatArray()
+        RCol.SetName("R")
+        ACol = vtk.vtkFloatArray()
+        ACol.SetName("A")
+        SCol = vtk.vtkFloatArray()
+        SCol.SetName("S")
+        for label, pt in zip(acpc_labels, acpc_arr):
+            labelCol.InsertNextValue(label)
+            RCol.InsertNextValue(pt[0])
+            ACol.InsertNextValue(pt[1])
+            SCol.InsertNextValue(pt[2])
+        for label, pt in zip(nuclei_labels, nuclei_arr):
+            labelCol.InsertNextValue(label)
+            RCol.InsertNextValue(pt[0])
+            ACol.InsertNextValue(pt[1])
+            SCol.InsertNextValue(pt[2])
+        # Make table node
+        tableNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode", "ACPC_Thal_Points_Table"
+        )
+        tableNode.AddColumn(labelCol)
+        tableNode.AddColumn(RCol)
+        tableNode.AddColumn(ACol)
+        tableNode.AddColumn(SCol)
+        # Save table
+        tablePath = Path(saveDir, f"ACPC_Thal_Points_Table{suffix}.csv")
+        saveNode(tableNode, str(tablePath))
+        logging.info(f"Saved to {tablePath}")
 
 
 #
@@ -930,7 +1131,7 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
             "vtkMRMLTransformNode", "TestACPCTransform"
         )
         logic = ACPCTransformLogic()
-        success = logic.run(markupsNode, outputTransformNode)
+        success = logic.calculateACPCTransform(markupsNode, outputTransformNode)
         self.assertTrue(success)
 
         matrix_vtk = vtk.vtkMatrix4x4()
@@ -958,7 +1159,7 @@ class ACPCTransformTest(ScriptedLoadableModuleTest):
                 i, slicer.vtkMRMLMarkupsNode.PositionDefined
             )
 
-        success = logic.run(markupsNode, outputTransformNode)
+        success = logic.calculateACPCTransform(markupsNode, outputTransformNode)
         self.assertTrue(success)
         outputTransformNode.GetMatrixTransformToParent(matrix_vtk)
         expected_elements_complex = [
