@@ -884,7 +884,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         """
         markupsNode.RemoveAllControlPoints()
         ANT_R = (3.8 + 5.85) / 2  # +4.82
-        ANT_A = -(2.1 + 6.35) / 2  # -4.225
+        ANT_A = (2.1 + 6.35) / 2  # 4.225
         ANT_S = (6.2 + 10.1) / 2  # +8.15
         defaultCoords = {
             "LCM": (-9.0, -4.5, 1.0),
