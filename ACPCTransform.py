@@ -883,16 +883,26 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         coordinates. Pulvinar landmarks are named but unplaced.
         """
         markupsNode.RemoveAllControlPoints()
+        # based on Dom's refs (no longer used, but leaving here for reference)
         ANT_R = (3.8 + 5.85) / 2  # +4.82
         ANT_A = (2.1 + 6.35) / 2  # 4.225
         ANT_S = (6.2 + 10.1) / 2  # +8.15
-        defaultCoords = {
+        refCoords = {
             "LCM": (-9.0, -4.5, 1.0),
             "RCM": (9.0, -4.5, 1.0),
             "LANT": (-ANT_R, ANT_A, ANT_S),
             "RANT": (ANT_R, ANT_A, ANT_S),
             "LPUL": None,
             "RPUL": None,
+        }
+        # Goldstein coords
+        defaultCoords = {
+            "LCM": (-8.0, -10.0, 1.0),
+            "RCM": (8.0, -10.0, 1.0),
+            "LANT": (-5.0, 2.0, 10.0),
+            "RANT": (5.0, 2.0, 10.0),
+            "LPUL": (-10.0, -14.0, 0.0),
+            "RPUL": (10.0, -14.0, 0.0),
         }
         markupsFromDict(defaultCoords, markupsNode)
 
@@ -911,13 +921,14 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
     def gatherNodesToHarden(self):
         scene = slicer.mrmlScene
         imageNodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode", scene)
-        labelNodes = slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode", scene)
+        # Apparently label nodes come with image nodes
+        # labelNodes = slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode", scene)
         modelNodes = slicer.util.getNodesByClass("vtkMRMLModelNode", scene)
         markupsNodes = slicer.util.getNodesByClass("vtkMRMLMarkupsNode", scene)
         # note, this gets all types of markups nodes ^^
         nodesToHarden = []
         nodesToHarden.extend(imageNodes)
-        nodesToHarden.extend(labelNodes)
+        # nodesToHarden.extend(labelNodes)
         nodesToHarden.extend(modelNodes)
         nodesToHarden.extend(markupsNodes)
         # We need to remove hidden nodes from the list before passing it on
