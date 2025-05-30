@@ -370,6 +370,8 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                     )
         # Set up if empty
         self.ensureNucleiMarkupsNodeIsSetup(node)
+        if node:
+            self.logic.lockAllControlPoints(node)
         # Handle related button states
         self.updateNextPointButtonState()
         self.updatePreviousPointButtonState()
@@ -605,7 +607,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         baseName = (
             self.nucleiMarkupsSelector.baseName
             if self.nucleiMarkupsSelector.baseName
-            else "ACPCSites_New"
+            else "Nuclei_Sites_New"
         )
         newNodeName = slicer.mrmlScene.GenerateUniqueName(baseName)
 
@@ -906,6 +908,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         dn.SetGlyphScale(1)
         dn.SetUseGlyphScale(True)
         dn.SetSelectedColor((0.0, 1.0, 1.0))  # cyan
+        dn.SetColor((1.0, 0.0, 1.0))  # magenta
 
     def checkPointsDefined(self, markupsNode):
         """Check that there are 3 points and they have defined positions.
@@ -973,17 +976,17 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         """
         markupsNode.RemoveAllControlPoints()
         # based on Dom's refs (no longer used, but leaving here for reference)
-        ANT_R = (3.8 + 5.85) / 2  # +4.82
-        ANT_A = (2.1 + 6.35) / 2  # 4.225
-        ANT_S = (6.2 + 10.1) / 2  # +8.15
-        refCoords = {
-            "LCM": (-9.0, -4.5, 1.0),
-            "RCM": (9.0, -4.5, 1.0),
-            "LANT": (-ANT_R, ANT_A, ANT_S),
-            "RANT": (ANT_R, ANT_A, ANT_S),
-            "LPUL": None,
-            "RPUL": None,
-        }
+        # ANT_R = (3.8 + 5.85) / 2  # +4.82
+        # ANT_A = (2.1 + 6.35) / 2  # 4.225
+        # ANT_S = (6.2 + 10.1) / 2  # +8.15
+        # refCoords = {
+        #    "LCM": (-9.0, -4.5, 1.0),
+        #    "RCM": (9.0, -4.5, 1.0),
+        #    "LANT": (-ANT_R, ANT_A, ANT_S),
+        #    "RANT": (ANT_R, ANT_A, ANT_S),
+        #    "LPUL": None,
+        #    "RPUL": None,
+        # }
         # Goldstein coords
         defaultCoords = {
             "LCM": (-8.0, -10.0, 1.0),
@@ -1054,6 +1057,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             nextIdx = 0
         if lockCurrent and (self._currentPointIdx is not None):
             nucleiMarkup.SetNthControlPointLocked(self._currentPointIdx, True)
+            nucleiMarkup.SetNthControlPointSelected(self._currentPointIdx, 1)
         self.jumpToPointIdx(nextIdx, nucleiMarkup)
 
     def jumpToPreviousPoint(self, nucleiMarkup, lockCurrent=True):
@@ -1079,6 +1083,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
             )
         # Unlock the point so it could be dragged
         markupsNode.SetNthControlPointLocked(idx, False)
+        markupsNode.SetNthControlPointSelected(idx, 0)
         # Check if the point position is undefined
         status = markupsNode.GetNthControlPointPositionStatus(idx)
         if status == slicer.vtkMRMLMarkupsNode.PositionUndefined:
@@ -1266,7 +1271,7 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         thalNucleiPointsPath = Path(loadDir, f"thalNucleiPoints{suffix}.mrk.json")
         # Check file existence
         if not tableFilePath.exists():
-            return False, "no table file found"
+            return False, f"No saved data available in {loadDir}"
         if not acpcPointsPath.exists():
             return False, "no acpcPoints.mrk.json file found"
         if not thalNucleiPointsPath.exists():
