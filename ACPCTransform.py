@@ -121,6 +121,13 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.reorientButton.toolTip = "Reorient AC-PC"
         self.reorientButton.enabled = False
         parametersFormLayout.addRow(self.reorientButton)
+
+        # Lock/Unlock ACPC points
+        self.lockStateButton = qt.QPushButton("Unlock AC-PC-IH Points")
+        self.lockStateButton.toolTip = "Place AC-PC-IH points to enable"
+        self.lockStateButton.enabled = False
+        parametersFormLayout.addRow(self.lockStateButton)
+
         # Create Nuclei Template Button
         self.createNucleiTemplateButton = qt.QPushButton("Create Nuclei Template")
         self.createNucleiTemplateButton.enabled = False
@@ -167,6 +174,11 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.saveButton.toolTip = "Save results to files (also clears scene!)"
         self.saveButton.enabled = True
         parametersFormLayout.addRow(self.saveButton)
+        # Load button
+        self.loadButton = qt.QPushButton("Reload Saved Data")
+        self.loadButton.toolTip = "Load saved results for current patient from files"
+        self.loadButton.enabled = True
+        parametersFormLayout.addRow(self.loadButton)
 
         # Connections
         self.createTemplateButton.connect(
@@ -179,6 +191,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             "nodeAddedByUser(vtkMRMLNode*)", self.onMarkupsNodeAddedByUser
         )
         self.reorientButton.connect("clicked(bool)", self.onReorientButton)
+        self.lockStateButton.connect("clicked(bool)", self.onLockStateButton)
         self.createNucleiTemplateButton.connect(
             "clicked(bool)", self.onCreateNucleiTemplateButton
         )
@@ -188,6 +201,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.nextPointButton.connect("clicked(bool)", self.onNextPointButton)
         self.previousPointButton.connect("clicked(bool)", self.onPreviousPointButton)
         self.saveButton.connect("clicked(bool)", self.onSaveButton)
+        self.loadButton.connect("clicked(bool)", self.onLoadButton)
 
         self.layout.addStretch(1)
         # Initial setup call for markups node if one is already selected from previous session/scene
@@ -195,6 +209,8 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             self.onMarkupsNodeSelected(self.markupsSelector.currentNode())
         else:  # Ensure place widget is cleared if no node is selected initially
             self.markupsPlaceWidget.setCurrentNode(None)
+        #
+        self.logic.setSliceIntersectionVisibility(True)
 
     def cleanup(self):
         ScriptedLoadableModuleWidget.cleanup(self)
@@ -313,6 +329,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             )  # No valid node selected, clear place widget
         # Update button state
         self.updateReorientButtonState()
+        self.updateLockStateButtonState()
 
     def onNucleiMarkupsNodeSelected(self, node):
         """ """
@@ -412,6 +429,7 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                 f"Markup event (ID: {event}) received from {caller.GetName()}"
             )
             self.updateReorientButtonState()
+            self.updateLockStateButtonState()
         else:
             logging.debug(
                 f"Markup event (ID: {event}) received from a deleted node. Ignoring."
@@ -466,6 +484,27 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
                 "Select AC, PC, and IH points to enable reorientation"
             )
             logging.debug("Reorient button state: disabled due to missing point(s)")
+
+    def updateLockStateButtonState(self):
+        """Enable if AC-PC-IH markups is selected.  Change text to Unlock if control
+        points are locked, to Lock if control points are unlocked.
+        """
+        markup = self.markupsSelector.currentNode()
+        enabled = markup is not None and markup.GetNumberOfControlPoints() > 0
+        self.lockStateButton.enabled = enabled
+        if enabled:
+            firstPointLocked = bool(markup.GetNthControlPointLocked(0))
+            if firstPointLocked:
+                buttonText = "Unlock AC-PC-IH Points"
+                tip = "Allow AC-PC-IH points to be dragged in order to fine tune and then reorient"
+            else:
+                buttonText = "Lock AC-PC-IH Points"
+                tip = "Prevent accidental dragging of AC-PC-IH points"
+        else:
+            buttonText = "Lock AC-PC-IH Points"
+            tip = "Place AC-PC-IH points to enable"
+        self.lockStateButton.text = buttonText
+        self.lockStateButton.toolTip = tip
 
     def updateNextPointButtonState(self):
         """Enable button if there is a nuclei markups node selected"""
@@ -622,6 +661,17 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
         self.jumpToPC()
         self.updateNucleiTemplateButtonState()
 
+    def onLockStateButton(self):
+        """Lock or unlock AC-PC-IH markups control points"""
+        markup = self.markupsSelector.currentNode()
+        if markup is not None:
+            unlockFlag = self.lockStateButton.text[0] == "U"
+            if unlockFlag:
+                self.logic.unlockAllControlPoints(markup)
+            else:
+                self.logic.lockAllControlPoints(markup)
+        self.updateLockStateButtonState()
+
     def jumpToPC(self):
         """Jump slice views to the posterior commissure point"""
         acpcMarkup = self.markupsSelector.currentNode()
@@ -630,10 +680,12 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
 
     def onNextPointButton(self):
         nucleiMarkup = self.nucleiMarkupsSelector.currentNode()
+        self.logic.setSliceIntersectionVisibility(True)
         self.logic.jumpToNextPoint(nucleiMarkup)
 
     def onPreviousPointButton(self):
         nucleiMarkup = self.nucleiMarkupsSelector.currentNode()
+        self.logic.setSliceIntersectionVisibility(True)
         self.logic.jumpToPreviousPoint(nucleiMarkup)
 
     def onSaveButton(self):
@@ -654,6 +706,39 @@ class ACPCTransformWidget(ScriptedLoadableModuleWidget):
             f"Results saved! The scene will be cleared to prepare for loading the next case."
         )
         self.reset()
+
+    def onLoadButton(self):
+        """To allow adjustment of saved ACPC alignment and nuclei locations"""
+        # NOTE: Block or undo current net transformation, or else could get confused
+        from slicer.util import updateTransformMatrixFromArray, errorDisplay, getNode
+
+        # Check that there are relevant loaded nodes in the scene
+        nodes = self.logic.gatherNodesToHarden()
+        if len(nodes) == 0:
+            errorDisplay("Load an MRB bundle file first before reloading ACPC data!")
+            return
+        try:
+            currentNetTransformNode = getNode("Total_ACPC_Transform")
+        except:
+            # Scene is missing this node, create
+            self.initializeNodes()
+        if not self._netACPCTransformNode:
+            # self is missing this node, create
+            self.initializeNodes()
+        acpcMarkup, nucleiMarkup, netTransformMatrix = self.logic.load(
+            None,
+            self._netACPCTransformNode,
+            self.markupsSelector.currentNode(),
+            self.nucleiMarkupsSelector.currentNode(),
+        )
+        # Replace transform matrix in initialized transform nodes
+        updateTransformMatrixFromArray(self._netACPCTransformNode, netTransformMatrix)
+        self._incrementalACPCTransformNode = None
+        # Select loaded nodes in selectors
+        self.markupsSelector.setCurrentNode(acpcMarkup)
+        self.nucleiMarkupsSelector.setCurrentNode(nucleiMarkup)
+        self.logic.reorientSlices()
+        self.jumpToPC()
 
     def reset(self):
         """Reset the state of the module to be able to start a new
@@ -878,6 +963,10 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         for cpIdx in range(markupsNode.GetNumberOfControlPoints()):
             markupsNode.SetNthControlPointLocked(cpIdx, True)
 
+    def unlockAllControlPoints(self, markupsNode):
+        for cpIdx in range(markupsNode.GetNumberOfControlPoints()):
+            markupsNode.SetNthControlPointLocked(cpIdx, False)
+
     def initializeThalNucMarkups(self, markupsNode):
         """Initialize thalamic nuclei markups node using AC-PC standardized
         coordinates. Pulvinar landmarks are named but unplaced.
@@ -1028,19 +1117,26 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         subFolderName = "DirectTargetingData"
         qtParent = None
         startDir = slicer.mrmlScene.GetRootDirectory()
-        caption = "Select Existing Folder to Save Results Under..."
-        chosenFolder = qt.QFileDialog.getExistingDirectory(qtParent, caption, startDir)
+        if startDir == slicer.app.defaultScenePath:
+            # Choose directory, default scene path isn't right!
+            caption = "Select Existing Folder to Save Results Under..."
+            chosenFolder = qt.QFileDialog.getExistingDirectory(
+                qtParent, caption, startDir
+            )
+        else:
+            chosenFolder = startDir
         saveDir = Path(chosenFolder, subFolderName)
         # Create directory if missing
         saveDir.mkdir(parents=True, exist_ok=True)
         # Save
+        # NOTE: changed so that file names are forced (no multiple versions for repetitions)
         suffix = ""
         testName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
-        counter = 1
-        while testName.exists():
-            suffix = f"_{counter}"
-            testName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
-            counter = counter + 1
+        # counter = 1
+        # while testName.exists():
+        #    suffix = f"_{counter}"
+        #    testName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
+        #    counter = counter + 1
 
         acpcPointsFilePath = Path(saveDir, f"acpcPoints{suffix}.mrk.json")
         nucleiFileName = Path(saveDir, f"thalNucleiPoints{suffix}.mrk.json")
@@ -1095,6 +1191,99 @@ class ACPCTransformLogic(ScriptedLoadableModuleLogic):
         tablePath = Path(saveDir, f"ACPC_Thal_Points_Table{suffix}.csv")
         saveNode(tableNode, str(tablePath))
         logging.info(f"Saved to {tablePath}")
+
+    def load(
+        self,
+        loadDir=None,
+        currentTransformNode=None,
+        currentACPCpoints=None,
+        currentThalNucPoints=None,
+    ):
+        """So it is possible to adjust saved positions, need to be able to load.
+        Also means that we need to time-stamp outputs, so that downstream calculations
+        can be re-done when needed.
+        """
+
+        from pathlib import Path
+        from slicer.util import (
+            errorDisplay,
+            loadTable,
+            arrayFromMarkupsControlPoints,
+            arrayFromTransformMatrix,
+            loadMarkups,
+            loadTransform,
+        )
+
+        scene = slicer.mrmlScene
+        if loadDir is None:
+            loadDir = Path(scene.GetRootDirectory(), "DirectTargetingData")
+        okToLoad, msg = self.checkCanLoad(loadDir)
+        if not okToLoad:
+            errorDisplay(msg)
+            raise Exception(msg)
+        # Ok to proceed with loading,
+        ### Restore original positions by inverting existing transformation
+        if currentTransformNode:
+            self.hardenAllTransforms()  # Shouldn't be necessary, but also shouldn't hurt
+            currentTransformNode.Inverse()
+            self.applyTransformToAll(currentTransformNode)
+        # Remove current points nodes (to be replaced by the loaded ones)
+        for node in [currentACPCpoints, currentThalNucPoints]:
+            scene.RemoveNode(node)
+        ### Load saved net ACPC transform
+        tformPath = Path(loadDir, "ACPC_TransformNode.tfm")
+        tempTForm = loadTransform(str(tformPath))
+        ### Apply saved net transform to everything
+        self.applyTransformToAll(tempTForm)
+        ### Load saved points
+        suffix = ""
+        acpcPointsPath = Path(loadDir, f"acpcPoints{suffix}.mrk.json")
+        acpcMarkup = loadMarkups(str(acpcPointsPath))
+        thalNucleiPointsPath = Path(loadDir, f"thalNucleiPoints{suffix}.mrk.json")
+        nucleiMarkup = loadMarkups(str(thalNucleiPointsPath))
+        # Load Table Node also?
+        tableFilePath = Path(loadDir, f"ACPC_Thal_Points_Table{suffix}.csv")
+        tableNode = loadTable(str(tableFilePath))
+        # Get Transform matrix
+        netTransformMatrix = arrayFromTransformMatrix(tempTForm)
+
+        return acpcMarkup, nucleiMarkup, netTransformMatrix
+
+    def checkCanLoad(self, loadDir) -> bool:
+        """Before loading, check that it seems like we can load"""
+        from pathlib import Path
+
+        scene = slicer.mrmlScene
+        sceneRootDir = scene.GetRootDirectory()
+        if sceneRootDir == slicer.app.defaultScenePath:
+            return False
+        if loadDir is None:
+            loadDir = Path(scene.GetRootDir(), "DirectTargetingData")
+        suffix = ""
+        # Table file
+        tableFilePath = Path(loadDir, f"ACPC_Thal_Points_Table{suffix}.csv")
+        acpcPointsPath = Path(loadDir, f"acpcPoints{suffix}.mrk.json")
+        thalNucleiPointsPath = Path(loadDir, f"thalNucleiPoints{suffix}.mrk.json")
+        # Check file existence
+        if not tableFilePath.exists():
+            return False, "no table file found"
+        if not acpcPointsPath.exists():
+            return False, "no acpcPoints.mrk.json file found"
+        if not thalNucleiPointsPath.exists():
+            return False, "no thalNucleiPoints.mrk.json file found"
+        # Everything seems to be OK
+        return True, ""
+
+    def setSliceIntersectionVisibility(self, visiblityFlag: bool = True):
+        """Turn on/off slice intersection visibility"""
+        visInt = 1 if visiblityFlag else 0
+        sliceDisplayNodes = slicer.util.getNodesByClass("vtkMRMLSliceDisplayNode")
+        for sliceDisplayNode in sliceDisplayNodes:
+            sliceDisplayNode.SetIntersectingSlicesVisibility(visInt)
+        # Force visual update (see https://github.com/Slicer/Slicer/issues/6338)
+        sliceNodes = slicer.util.getNodesByClass("vtkMRMLSliceNode")
+        for sliceNode in sliceNodes:
+            sliceNode.Modified()
 
 
 #
